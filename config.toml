@@ -1,2 +1,8 @@
+# If listening on these IPs, they are considered the dangerous ones
 closeips = [ "0.0.0.0", "::" ]
+# Never block listening on these ports
 protectedports = [ "22" ]
+# Check every X seconds
+every = 60
+# Drop (silent) or reject (respond) connections
+droporreject = "drop"

@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/cakturk/go-netstat/netstat"
+	"github.com/docopt/docopt-go"
 	"github.com/fusion/ltfw/pkg/config"
 	"github.com/fusion/ltfw/pkg/iptables"
 	"github.com/hydronica/toml"
@@ -25,6 +27,28 @@ const (
 	v6    = iota
 )
 
+var cmdline struct {
+	Run     bool   `docopt:"run"`
+	Config  string `docopt:"-c,--config"`
+	Quiet   bool   `docopt:"-q,--quiet"`
+	Verbose bool   `docopt:"-v,--verbose"`
+}
+
+var usage = `ltfw - Light Touch Firewall.
+
+Usage:
+  ltfw [--quiet|--verbose] [--config=<path>] run
+  ltfw -h --help
+  ltfw --version
+
+Options:
+  -h, --help                Show this screen.
+  -v, --version             Show version.
+  -c, --config=<file>       Config file.
+  -q, --quiet               Suppress output.
+  --verbose                 Comprehensive output.
+`
+
 type addrData struct {
 	transport Transport
 	l3        L3
@@ -36,13 +60,28 @@ type program struct {
 }
 
 func main() {
+	if parseMyArgs() != nil {
+		fmt.Println("Unable to parse command-line arguments")
+		os.Exit(1)
+	}
+
+	cfg := readConfig()
+	if cfg == nil {
+		fmt.Println("Could not find config file.")
+		os.Exit(1)
+	}
+	if cfg.DropOrReject != "drop" && cfg.DropOrReject != "reject" {
+		fmt.Println("Configuration/DropOrReject: should be one of 'drop' or 'reject'")
+		os.Exit(1)
+	}
+
 	serviceConfig := &service.Config{
 		Name:        "LT",
 		DisplayName: "Light Touch Firewall",
 		Description: "Not even a real firewall",
 	}
 	prg := &program{
-		cfg: readConfig(),
+		cfg: cfg,
 	}
 	if !prg.checkIPTablesReady() {
 		fmt.Println("IPTables not ready, exiting")
@@ -60,31 +99,52 @@ func main() {
 	}
 }
 
+func parseMyArgs() error {
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], "0.1.0")
+	if err != nil {
+		return err
+	}
+	opts.Bind(&cmdline)
+	if cmdline.Config == "" {
+		cmdline.Config = "config.toml"
+	}
+
+	return nil
+}
+
 func readConfig() *config.Config {
 	cfg := config.Config{}
-	toml.DecodeFile("config.toml", &cfg)
+	if _, err := toml.DecodeFile(cmdline.Config, &cfg); err != nil {
+		return nil
+	}
 	return &cfg
 }
 
 func (p program) Start(s service.Service) error {
-	fmt.Println(s.String() + " started")
+	if !cmdline.Quiet {
+		fmt.Println(s.String() + " started, checking every " + strconv.Itoa(int(p.cfg.Every)) + " seconds...")
+	}
 	go p.run()
 	return nil
 }
 
 func (p program) Stop(s service.Service) error {
-	fmt.Println(s.String() + " stopped")
+	if !cmdline.Quiet {
+		fmt.Println(s.String() + " stopped")
+	}
 	return nil
 }
 
 func (p program) run() {
 	for {
-		fmt.Println("Service is running")
+		if !cmdline.Quiet {
+			fmt.Println("checking")
+		}
 
 		portsInfo := p.getPortList()
 		p.updateRules(portsInfo)
 
-		time.Sleep(100 * time.Second)
+		time.Sleep(p.cfg.Every * time.Second)
 	}
 }
 
@@ -203,12 +263,14 @@ func (p program) updateRulesForProto(ipt *iptables.IPTables, wtabs []addrData) {
 		if p.isPortProtected(&e.tab) {
 			continue
 		}
-		fmt.Println(e.transport, e.tab.LocalAddr.IP.String(), e.tab.LocalAddr.Port)
+		if cmdline.Verbose {
+			fmt.Println("- blocking:", e.transport, e.tab.LocalAddr.IP.String(), e.tab.LocalAddr.Port)
+		}
 		ipt.AppendUnique(
 			"filter", "INPUT",
 			"-p", getProtoStr()[e.transport],
 			"--destination-port", strconv.Itoa(int(e.tab.LocalAddr.Port)),
-			"-j", "DROP")
+			"-j", dropOrRejectStr()[p.cfg.DropOrReject])
 	}
 }
 
@@ -242,4 +304,8 @@ func FilterWrappedTabEntry(vs []addrData, f func(addrData) bool) []addrData {
 
 func getProtoStr() map[Transport]string {
 	return map[Transport]string{TCP: "tcp", UDP: "udp"}
+}
+
+func dropOrRejectStr() map[string]string {
+	return map[string]string{"drop": "DROP", "reject": "REJECT"}
 }
